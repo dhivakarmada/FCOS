@@ -1,0 +1,474 @@
+generator client {
+  provider = "prisma-client-js"
+  engineType = "library"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  VENDOR_ADMIN
+  WAREHOUSE_MANAGER
+  STAFF
+}
+
+enum OrderStatus {
+  CREATED
+  PICKING
+  PICKED
+  QC_PENDING
+  QC_PASSED
+  QC_FAILED
+  PACKED
+  READY_FOR_DISPATCH
+  SHIPPED
+  OUT_FOR_DELIVERY
+  DELIVERED
+  RETURNED
+  CANCELLED
+  FAILED
+}
+
+enum StockMovementType {
+  INBOUND
+  OUTBOUND
+  TRANSFER
+  ADJUSTMENT
+}
+
+enum TaskStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+model Vendor {
+  id            String   @id @default(cuid())
+  name          String
+  contactEmail  String   @unique
+  contactPhone  String?
+  logoUrl       String?
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  deletedAt     DateTime?
+  
+  users         User[]
+  warehouses    Warehouse[]
+  products      Product[]
+  orders        Order[]
+  staff         Staff[]
+  orderSources  OrderSource[]
+  webhookEndpoints WebhookEndpoint[]
+  apiKeys       VendorApiKey[]
+}
+
+model User {
+  id            String     @id @default(cuid())
+  email         String     @unique
+  password      String
+  firstName     String
+  lastName      String
+  role          UserRole   @default(STAFF)
+  vendorId      String?
+  vendor        Vendor?    @relation(fields: [vendorId], references: [id])
+  
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  deletedAt     DateTime?
+  
+  auditLogs         AuditLog[]
+  assignedTasks     StaffTask[]
+  stockLogs         StockLog[]
+  staffActivityLogs StaffActivityLog[]
+}
+
+model StaffActivityLog {
+  id            String   @id @default(cuid())
+  staffId       String
+  staff         User     @relation(fields: [staffId], references: [id])
+  taskId        String?
+  orderId       String?
+  sku           String?
+  quantity      Int?
+  actionType    String   // PICK_SCAN, PACK_CONFIRM, DISPATCH_SCAN, ERROR_SCAN
+  isSuccess     Boolean  @default(true)
+  errorMessage  String?
+  timestamp     DateTime @default(now())
+  
+  @@index([staffId])
+  @@index([actionType])
+}
+
+model Warehouse {
+  id          String   @id @default(cuid())
+  name        String
+  location    String
+  vendorId    String?
+  vendor      Vendor?  @relation(fields: [vendorId], references: [id])
+  
+  bins        Bin[]
+  inventory   InventoryItem[]
+  staff       Staff[]
+  orders      Order[]
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  deletedAt   DateTime?
+
+  @@index([vendorId])
+}
+
+model Bin {
+  id          String      @id @default(cuid())
+  code        String      // e.g. A-01-01
+  warehouseId String
+  warehouse   Warehouse   @relation(fields: [warehouseId], references: [id])
+  
+  inventory   InventoryItem[]
+
+  @@index([warehouseId])
+}
+
+model Product {
+  id          String   @id @default(cuid())
+  sku         String
+  name        String
+  description String?
+  category    String?
+  price       Decimal  @db.Decimal(10, 2)
+  weight      Float?   // in kg
+  barcode     String?  @unique
+  
+  vendorId    String
+  vendor      Vendor   @relation(fields: [vendorId], references: [id])
+  
+  inventory   InventoryItem[]
+  orderItems  OrderItem[]
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  deletedAt   DateTime?
+
+  @@unique([vendorId, sku])
+  @@index([vendorId])
+  @@index([sku])
+}
+
+model InventoryItem {
+  id          String    @id @default(cuid())
+  productId   String
+  product     Product   @relation(fields: [productId], references: [id])
+  warehouseId String
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
+  binId       String?
+  bin         Bin?      @relation(fields: [binId], references: [id])
+  
+  quantity         Int       @default(0)
+  reservedQuantity Int       @default(0)
+  minStock         Int       @default(5)
+  batchNumber      String?
+  expiryDate       DateTime?
+  
+  logs        StockLog[]
+  
+  updatedAt   DateTime  @updatedAt
+  
+  @@unique([productId, warehouseId, binId])
+  @@index([productId])
+  @@index([warehouseId])
+  @@index([quantity])
+  @@index([warehouseId, productId])
+}
+
+model StockLog {
+  id              String            @id @default(cuid())
+  inventoryItemId String
+  inventoryItem   InventoryItem     @relation(fields: [inventoryItemId], references: [id])
+  type            StockMovementType
+  quantityChange  Int
+  reason          String?
+  performedById   String?
+  performedBy     User?             @relation(fields: [performedById], references: [id])
+  createdAt       DateTime          @default(now())
+
+  @@index([inventoryItemId])
+}
+
+model Order {
+  id            String      @id @default(cuid())
+  orderNumber   String      @unique
+  vendorId      String
+  vendor        Vendor      @relation(fields: [vendorId], references: [id])
+  warehouseId   String?
+  warehouse     Warehouse?  @relation(fields: [warehouseId], references: [id])
+  status        OrderStatus @default(CREATED)
+  
+  customerName  String
+  customerEmail String
+  customerPhone String?
+  addressLine1  String
+  addressLine2  String?
+  city          String
+  state         String
+  zipCode       String
+  country       String      @default("India")
+  
+  totalAmount   Decimal     @db.Decimal(10, 2)
+  gstAmount     Decimal     @db.Decimal(10, 2)
+  
+  items         OrderItem[]
+  shipment      Shipment?
+  returns       Return[]
+  invoice       Invoice?
+  tasks         StaffTask[]
+  
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  deletedAt     DateTime?
+
+  @@index([vendorId])
+  @@index([warehouseId])
+  @@index([orderNumber])
+  @@index([status])
+  @@index([vendorId, status])
+  @@index([createdAt])
+}
+
+model OrderItem {
+  id        String  @id @default(cuid())
+  orderId   String
+  order     Order   @relation(fields: [orderId], references: [id])
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+  
+  quantity  Int
+  price     Decimal @db.Decimal(10, 2)
+
+  @@index([orderId])
+  @@index([productId])
+}
+
+model Shipment {
+  id               String    @id @default(cuid())
+  orderId          String    @unique
+  order            Order     @relation(fields: [orderId], references: [id])
+  
+  courierName      String?
+  trackingNumber   String?   @unique
+  labelUrl         String?
+  estimatedArrival DateTime?
+  shippedAt        DateTime?
+  deliveredAt      DateTime?
+  
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([trackingNumber])
+}
+
+model Return {
+  id           String   @id @default(cuid())
+  orderId      String
+  order        Order    @relation(fields: [orderId], references: [id])
+  
+  reason       String
+  status       String   @default("REQUESTED") // REQUESTED, APPROVED, REJECTED, RECEIVED, REFUNDED
+  refundAmount Decimal? @db.Decimal(10, 2)
+  
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([orderId])
+}
+
+model Invoice {
+  id          String   @id @default(cuid())
+  orderId     String   @unique
+  order       Order    @relation(fields: [orderId], references: [id])
+  invoiceUrl  String
+  gstNumber   String?
+  totalAmount Decimal  @db.Decimal(10, 2)
+  createdAt   DateTime @default(now())
+}
+
+model StaffTask {
+  id          String     @id @default(cuid())
+  orderId     String?
+  order       Order?     @relation(fields: [orderId], references: [id])
+  staffId     String
+  staff       User       @relation(fields: [staffId], references: [id])
+  taskType    String     // PICKING, PACKING, DISPATCH, RETURN_VERIFY
+  status      TaskStatus @default(PENDING)
+  startedAt   DateTime?
+  completedAt DateTime?
+  
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@index([staffId])
+  @@index([orderId])
+}
+
+model Staff {
+  id          String     @id @default(cuid())
+  vendorId    String?
+  vendor      Vendor?    @relation(fields: [vendorId], references: [id])
+  warehouseId String?
+  warehouse   Warehouse? @relation(fields: [warehouseId], references: [id])
+  
+  userId      String?    @unique
+  
+  firstName   String
+  lastName    String
+  phone       String?
+  designation String?
+  performance Float      @default(0.0) // Metric for efficiency
+  isActive    Boolean    @default(false)
+  
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  action    String
+  module    String
+  details   Json?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([module])
+}
+
+model NotificationTemplate {
+  id         String   @id // e.g. T-01, T-02
+  name       String
+  event      String   @unique
+  email      Boolean  @default(true)
+  sms        Boolean  @default(false)
+  whatsapp   Boolean  @default(false)
+  lastEdited DateTime @updatedAt
+}
+
+model NotificationLog {
+  id        String   @id @default(cuid())
+  template  String
+  channel   String   // EMAIL, SMS, WHATSAPP
+  recipient String
+  status    String   // SENT, DELIVERED, FAILED
+  time      DateTime @default(now())
+}
+
+model AutomationRule {
+  id           String   @id // e.g. AR-101
+  name         String
+  trigger      String
+  condition    String
+  action       String
+  active       Boolean  @default(true)
+  executions   Int      @default(0)
+  lastExecuted String   @default("Never")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model AutomationExecutionLog {
+  id        String   @id @default(cuid())
+  time      DateTime @default(now())
+  ruleName  String
+  details   String
+  status    String   // DRY_RUN, TRIGGERED, FAILED
+}
+
+model Integration {
+  id            String   @id // e.g. shopify, woocommerce, delhivery
+  name          String
+  category      String   // ecommerce, shipping, payments, communication
+  status        String   @default("DISCONNECTED") // CONNECTED, DISCONNECTED
+  lastSync      String   @default("Never")
+  apiEndpoint   String
+  apiKey        String?
+  webhookSecret String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model IntegrationWebhookLog {
+  id        String   @id @default(cuid())
+  source    String
+  event     String
+  code      Int
+  status    String   // SUCCESS, FAILED
+  time      DateTime @default(now())
+}
+
+model RolePermission {
+  id          String   @id @default(cuid())
+  roleName    String   @unique // e.g. SUPER_ADMIN, VENDOR_ADMIN, CUSTOM_ROLE
+  permissions Json     // Holds the permissions map: { "orders.read": true, ... }
+  isCustom    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model OrderSource {
+  id             String   @id @default(cuid())
+  name           String   // e.g. Shopify Store, Amazon Channel
+  type           String   // SHOPIFY, WOOCOMMERCE, AMAZON, CSV, etc.
+  status         String   // CONNECTED, DISCONNECTED, ERROR
+  lastSync       DateTime?
+  ordersReceived Int      @default(0)
+  syncHealth     Int      @default(100) // 0-100%
+  apiHealth      Int      @default(100) // 0-100%
+  vendorId       String
+  vendor         Vendor   @relation(fields: [vendorId], references: [id])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model WebhookEndpoint {
+  id             String   @id @default(cuid())
+  url            String
+  secret         String
+  events         String[] // Array of registered events e.g. ["order.created", "order.updated"]
+  isActive       Boolean  @default(true)
+  vendorId       String
+  vendor         Vendor   @relation(fields: [vendorId], references: [id])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  
+  logs           WebhookDeliveryLog[]
+}
+
+model WebhookDeliveryLog {
+  id             String   @id @default(cuid())
+  endpointId     String
+  endpoint       WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+  event          String
+  payload        Json
+  responseCode   Int?
+  responseBody   String?
+  status         String   // SUCCESS, FAILED, RETRYING
+  attempts       Int      @default(1)
+  createdAt      DateTime @default(now())
+}
+
+model VendorApiKey {
+  id             String   @id @default(cuid())
+  apiKey         String   @unique
+  apiSecret      String
+  webhookSecret  String
+  isActive       Boolean  @default(true)
+  vendorId       String
+  vendor         Vendor   @relation(fields: [vendorId], references: [id])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
